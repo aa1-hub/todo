@@ -316,6 +316,24 @@ body {
   justify-content: space-between;
   margin-top: 10px;
   padding-top: 10px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.input-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.repeat-select {
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid;
+  background: #fff;
+  cursor: pointer;
 }
 
 .checkbox-label {
