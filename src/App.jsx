@@ -472,6 +472,8 @@ export default function App() {
   const [tasks, setTasks] = useState([]);
   const [input, setInput] = useState("");
   const [fixedRecurring, setFixedRecurring] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkText, setBulkText] = useState("");
   const [repeat, setRepeat] = useState("none"); // none | weekly | monthly | yearly
   const [repeatWeekday, setRepeatWeekday] = useState(new Date().getDay());
   const [repeatMonthDay, setRepeatMonthDay] = useState(new Date().getDate());
@@ -582,6 +584,24 @@ export default function App() {
     setRepeat("none");
     inputRef.current?.focus();
   }, [input, fixedRecurring, repeat, repeatWeekday, repeatMonthDay, selectedDate]);
+
+  const addBulkTasks = useCallback(() => {
+    // 줄바꿈 또는 쉼표로 구분된 여러 줄을 각각 한 건씩 등록 (한 줄당 날짜/요일 자동 인식)
+    const lines = bulkText
+      .split(/[\n,]+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!lines.length) return;
+    const newTasks = lines.map((line) =>
+      makeTask(line, fixedRecurring, repeat, {
+        weekday: repeatWeekday,
+        monthDay: repeatMonthDay,
+      })
+    );
+    setTasks((prev) => [...newTasks, ...prev]);
+    setBulkText("");
+    setBulkOpen(false);
+  }, [bulkText, fixedRecurring, repeat, repeatWeekday, repeatMonthDay]);
 
   const toggleDone = (id) =>
     setTasks((prev) => {
@@ -1010,6 +1030,29 @@ export default function App() {
                   추가 (Enter)
                 </button>
               </div>
+
+              <button
+                onClick={() => setBulkOpen((o) => !o)}
+                className="bulk-toggle"
+                style={{ color: teal }}
+              >
+                {bulkOpen ? "여러 개 한 번에 추가 닫기 ▲" : "여러 개 한 번에 추가 ▾"}
+              </button>
+
+              {bulkOpen && (
+                <div className="bulk-panel" style={{ borderTop: `1px solid ${line}` }}>
+                  <textarea
+                    value={bulkText}
+                    onChange={(e) => setBulkText(e.target.value)}
+                    placeholder={"한 줄에 하나씩(또는 쉼표로 구분) 써주세요.\n예)\n내일 업무미팅\n모레 업무미팅2\n3월 5일 여행자보험\n4월 12일 여행자보험"}
+                    className="bulk-textarea"
+                    rows={5}
+                  />
+                  <button onClick={addBulkTasks} className="add-btn bulk-submit-btn" style={{ background: teal }}>
+                    모두 추가
+                  </button>
+                </div>
+              )}
             </div>
 
             {selectedDate ? (
