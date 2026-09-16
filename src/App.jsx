@@ -99,12 +99,87 @@ function parseKoreanDate(text, now = new Date()) {
   return { date, hasTime };
 }
 
-/** 고정 업무용: 마감일이 주말이면 가장 가까운 앞쪽 평일(금요일)로 당김 */
-function pullForwardIfWeekend(date) {
+/**
+ * 대한민국 공휴일 계산
+ * - 신정·삼일절·어린이날·현충일·광복절·개천절·한글날·크리스마스는 매년 날짜가
+ *   고정이라 아래에서 자동으로 계산합니다 (대체공휴일 규칙 포함, 몇 년이 지나도
+ *   계속 정상 작동합니다).
+ * - 설날·추석·부처님오신날은 음력 기준이라 자동 계산이 어려워, 확인된 해(2026~2028년)만
+ *   날짜를 직접 넣어뒀습니다. 2029년 이후가 되면 그 해의 음력 명절 날짜를 검색해서
+ *   아래 LUNAR_HOLIDAYS_KR에 추가해주세요. (임시공휴일은 반영하지 않았습니다)
+ */
+const LUNAR_HOLIDAYS_KR = {
+  2026: [
+    "2026-02-16", "2026-02-17", "2026-02-18", // 설날 연휴
+    "2026-05-24", "2026-05-25", // 부처님오신날 (+대체공휴일)
+    "2026-09-24", "2026-09-25", "2026-09-26", // 추석 연휴
+  ],
+  2027: [
+    "2027-02-06", "2027-02-07", "2027-02-08", "2027-02-09", // 설날 연휴(일요일과 겹쳐 하루 더)
+    "2027-05-13", // 부처님오신날
+    "2027-09-14", "2027-09-15", "2027-09-16", // 추석 연휴
+  ],
+  2028: [
+    "2028-01-25", "2028-01-26", "2028-01-27", // 설날 연휴
+    "2028-05-05", // 부처님오신날 (어린이날과 겹침)
+    "2028-10-02", "2028-10-03", "2028-10-04", // 추석 연휴
+  ],
+};
+
+// 매년 날짜가 고정된 공휴일. substitute:true 인 것은 주말과 겹치면 대체공휴일이 생김.
+const FIXED_HOLIDAYS_KR = [
+  { month: 0, day: 1, substitute: false }, // 신정
+  { month: 2, day: 1, substitute: true }, // 삼일절
+  { month: 4, day: 5, substitute: true }, // 어린이날
+  { month: 5, day: 6, substitute: false }, // 현충일
+  { month: 7, day: 15, substitute: true }, // 광복절
+  { month: 9, day: 3, substitute: true }, // 개천절
+  { month: 9, day: 9, substitute: true }, // 한글날
+  { month: 11, day: 25, substitute: false }, // 크리스마스
+];
+
+function holidayKey(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function buildHolidaySetForYear(year) {
+  const set = new Set(LUNAR_HOLIDAYS_KR[year] || []);
+  FIXED_HOLIDAYS_KR.forEach(({ month, day }) => {
+    set.add(holidayKey(new Date(year, month, day)));
+  });
+  // 대체공휴일: 주말과 겹치면 겹치지 않는 다음 평일로
+  FIXED_HOLIDAYS_KR.forEach(({ month, day, substitute }) => {
+    if (!substitute) return;
+    const d = new Date(year, month, day);
+    if (d.getDay() === 0 || d.getDay() === 6) {
+      const sub = new Date(d);
+      do {
+        sub.setDate(sub.getDate() + 1);
+      } while (sub.getDay() === 0 || sub.getDay() === 6 || set.has(holidayKey(sub)));
+      set.add(holidayKey(sub));
+    }
+  });
+  return set;
+}
+
+const holidaySetCache = {};
+function isNonWorkingDay(date) {
+  const dow = date.getDay();
+  if (dow === 0 || dow === 6) return true;
+  const year = date.getFullYear();
+  if (!holidaySetCache[year]) holidaySetCache[year] = buildHolidaySetForYear(year);
+  return holidaySetCache[year].has(holidayKey(date));
+}
+
+/** 주말·공휴일이면 가장 가까운 이전 평일로 당김 (연휴가 겹쳐도 평일까지 계속 당김) */
+function adjustToWorkday(date) {
   const d = new Date(date);
-  const dow = d.getDay();
-  if (dow === 6) d.setDate(d.getDate() - 1); // 토 -> 금
-  if (dow === 0) d.setDate(d.getDate() - 2); // 일 -> 금
+  while (isNonWorkingDay(d)) {
+    d.setDate(d.getDate() - 1);
+  }
   return d;
 }
 
@@ -133,19 +208,20 @@ function dayKey(d) {
 }
 
 // ---------------------------------------------------------------------------
-// 저장소 — 서버(Vercel KV)에 저장, 비밀번호로 접근 구분
+// 저장소 — 서버(Vercel + Upstash Redis)에 저장, 아이디+비밀번호로 접근 구분
 // ---------------------------------------------------------------------------
 const PASSWORD_KEY = "todo-webapp:password";
+const USERID_KEY = "todo-webapp:userid";
 
 const SEED = [
-  { text: "당직비 정산 자료 취합 20일", fixedRecurring: true },
-  { text: "비기너 과정 상품권 발송 내일", fixedRecurring: false },
-  { text: "CFS 실적 정리 다음주 금요일", fixedRecurring: false, cfsTarget: true },
+  { text: "당직비 정산 자료 취합 19일", fixedRecurring: true, repeat: "monthly" },
+  { text: "비기너 과정 상품권 발송 내일", fixedRecurring: false, repeat: "none" },
+  { text: "CFS 실적 정리 다음주 금요일", fixedRecurring: false, repeat: "none", cfsTarget: true },
 ];
 
-async function fetchTasks(password) {
+async function fetchTasks(userId, password) {
   const res = await fetch("/api/tasks", {
-    headers: { "x-app-password": password },
+    headers: { "x-app-password": password, "x-app-userid": userId },
   });
   if (res.status === 401) throw new Error("unauthorized");
   if (!res.ok) throw new Error("failed");
@@ -153,22 +229,47 @@ async function fetchTasks(password) {
   return data.tasks || [];
 }
 
-async function saveTasks(password, tasks) {
+async function saveTasks(userId, password, tasks) {
   await fetch("/api/tasks", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-app-password": password },
+    headers: {
+      "Content-Type": "application/json",
+      "x-app-password": password,
+      "x-app-userid": userId,
+    },
     body: JSON.stringify({ tasks }),
   });
 }
 
-function makeTask(rawText, fixedRecurring) {
+function makeTask(rawText, fixedRecurring, repeat = "none") {
   const { date, hasTime } = parseKoreanDate(rawText);
-  const due = date && fixedRecurring ? pullForwardIfWeekend(date) : date;
+  const base = date || startOfDay(new Date());
+  const hour = hasTime ? base.getHours() : 9;
+  const minute = hasTime ? base.getMinutes() : 0;
+
+  let anchorDay = null;
+  let anchorWeekday = null;
+  let anchorMonth = null;
+  if (repeat === "monthly") anchorDay = base.getDate();
+  if (repeat === "weekly") anchorWeekday = base.getDay();
+  if (repeat === "yearly") {
+    anchorMonth = base.getMonth();
+    anchorDay = base.getDate();
+  }
+
+  const due = fixedRecurring ? adjustToWorkday(base) : base;
+
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     text: rawText.trim(),
-    due: due ? due.toISOString() : null,
+    due: due.toISOString(),
     hasTime,
+    hour,
+    minute,
+    repeat,
+    anchorDay,
+    anchorWeekday,
+    anchorMonth,
     fixedRecurring,
     cfsTarget: false,
     done: false,
@@ -176,9 +277,48 @@ function makeTask(rawText, fixedRecurring) {
   };
 }
 
+/** 완료된 반복 업무의 다음 회차 날짜를 계산 */
+function computeNextOccurrence(task) {
+  const cur = new Date(task.due);
+  let next;
+
+  if (task.repeat === "monthly") {
+    let y = cur.getFullYear();
+    let m = cur.getMonth() + 1;
+    if (m > 11) {
+      m = 0;
+      y += 1;
+    }
+    const dim = new Date(y, m + 1, 0).getDate();
+    const day = Math.min(task.anchorDay, dim);
+    next = new Date(y, m, day, task.hour, task.minute);
+  } else if (task.repeat === "weekly") {
+    next = new Date(cur);
+    next.setDate(next.getDate() + 7);
+    next.setHours(task.hour, task.minute, 0, 0);
+  } else if (task.repeat === "yearly") {
+    const y = cur.getFullYear() + 1;
+    const dim = new Date(y, task.anchorMonth + 1, 0).getDate();
+    const day = Math.min(task.anchorDay, dim);
+    next = new Date(y, task.anchorMonth, day, task.hour, task.minute);
+  } else {
+    return null;
+  }
+
+  if (task.fixedRecurring) next = adjustToWorkday(next);
+  return next;
+}
+
+function repeatLabel(task) {
+  if (task.repeat === "monthly") return `매월 ${task.anchorDay}일`;
+  if (task.repeat === "weekly") return `매주 ${WEEKDAY_LABEL[task.anchorWeekday]}요일`;
+  if (task.repeat === "yearly") return `매년 ${task.anchorMonth + 1}월 ${task.anchorDay}일`;
+  return null;
+}
+
 function seedTasks() {
   return SEED.map((s) => {
-    const t = makeTask(s.text, s.fixedRecurring);
+    const t = makeTask(s.text, s.fixedRecurring, s.repeat || "none");
     if (s.cfsTarget) t.cfsTarget = true;
     return t;
   });
@@ -212,15 +352,18 @@ function buildCalendarCells(viewMonth) {
 }
 
 export default function App() {
+  const [userId, setUserId] = useState(() => localStorage.getItem(USERID_KEY) || "");
   const [password, setPassword] = useState(() => localStorage.getItem(PASSWORD_KEY) || "");
   const [unlocked, setUnlocked] = useState(false);
   const [checking, setChecking] = useState(true);
+  const [userIdInput, setUserIdInput] = useState("");
   const [passwordInput, setPasswordInput] = useState("");
   const [authError, setAuthError] = useState("");
 
   const [tasks, setTasks] = useState([]);
   const [input, setInput] = useState("");
   const [fixedRecurring, setFixedRecurring] = useState(false);
+  const [repeat, setRepeat] = useState("none"); // none | weekly | monthly | yearly
   const [filter, setFilter] = useState("all"); // all | today | upcoming | done | cfs
   const [copyFlash, setCopyFlash] = useState(false);
   const [viewMonth, setViewMonth] = useState(() => {
@@ -234,28 +377,36 @@ export default function App() {
   const inputRef = useRef(null);
   const skipNextSave = useRef(false);
 
-  const tryUnlock = useCallback(async (pw) => {
+  const tryUnlock = useCallback(async (uid, pw) => {
     setAuthError("");
+    const trimmedId = uid.trim();
+    if (!trimmedId) {
+      setAuthError("아이디를 입력해주세요.");
+      setChecking(false);
+      return;
+    }
     try {
-      const serverTasks = await fetchTasks(pw);
+      const serverTasks = await fetchTasks(trimmedId, pw);
       skipNextSave.current = true;
       setTasks(serverTasks.length ? serverTasks : seedTasks());
+      setUserId(trimmedId);
       setPassword(pw);
       setUnlocked(true);
+      localStorage.setItem(USERID_KEY, trimmedId);
       localStorage.setItem(PASSWORD_KEY, pw);
     } catch (e) {
       localStorage.removeItem(PASSWORD_KEY);
-      setAuthError("비밀번호가 틀렸습니다.");
+      setAuthError("아이디 또는 비밀번호가 틀렸습니다.");
       setUnlocked(false);
     } finally {
       setChecking(false);
     }
   }, []);
 
-  // 처음 열었을 때 저장된 비밀번호로 자동 로그인 시도
+  // 처음 열었을 때 저장된 아이디/비밀번호로 자동 로그인 시도
   useEffect(() => {
-    if (password) {
-      tryUnlock(password);
+    if (userId && password) {
+      tryUnlock(userId, password);
     } else {
       setChecking(false);
     }
@@ -269,16 +420,16 @@ export default function App() {
       skipNextSave.current = false;
       return;
     }
-    saveTasks(password, tasks).catch(() => {
+    saveTasks(userId, password, tasks).catch(() => {
       /* 저장 실패는 조용히 무시 — 다음 변경 때 다시 시도됨 */
     });
-  }, [tasks, unlocked, password]);
+  }, [tasks, unlocked, userId, password]);
 
   // 다른 기기에서 바뀐 내용을 반영하기 위해, 창에 다시 포커스될 때 새로고침
   useEffect(() => {
     if (!unlocked) return;
     const onFocus = () => {
-      fetchTasks(password)
+      fetchTasks(userId, password)
         .then((serverTasks) => {
           skipNextSave.current = true;
           setTasks(serverTasks);
@@ -287,10 +438,10 @@ export default function App() {
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [unlocked, password]);
+  }, [unlocked, userId, password]);
 
   const manualRefresh = () => {
-    fetchTasks(password)
+    fetchTasks(userId, password)
       .then((serverTasks) => {
         skipNextSave.current = true;
         setTasks(serverTasks);
@@ -301,14 +452,36 @@ export default function App() {
   const addTask = useCallback(() => {
     const trimmed = input.trim();
     if (!trimmed) return;
-    setTasks((prev) => [makeTask(trimmed, fixedRecurring), ...prev]);
+    setTasks((prev) => [makeTask(trimmed, fixedRecurring, repeat), ...prev]);
     setInput("");
     setFixedRecurring(false);
+    setRepeat("none");
     inputRef.current?.focus();
-  }, [input, fixedRecurring]);
+  }, [input, fixedRecurring, repeat]);
 
   const toggleDone = (id) =>
-    setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, done: !t.done } : t)));
+    setTasks((prev) => {
+      const target = prev.find((t) => t.id === id);
+      if (!target) return prev;
+      const nowDone = !target.done;
+      const updated = prev.map((t) => (t.id === id ? { ...t, done: nowDone } : t));
+      // 반복 업무를 완료 처리하면 다음 회차를 자동으로 새로 만들어 추가
+      if (nowDone && target.repeat !== "none") {
+        const nextDue = computeNextOccurrence(target);
+        if (nextDue) {
+          const spawned = {
+            ...target,
+            id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            due: nextDue.toISOString(),
+            done: false,
+            cfsTarget: false,
+            createdAt: new Date().toISOString(),
+          };
+          return [spawned, ...updated];
+        }
+      }
+      return updated;
+    });
   const toggleCfs = (id) =>
     setTasks((prev) => prev.map((t) => (t.id === id ? { ...t, cfsTarget: !t.cfsTarget } : t)));
   const removeTask = (id) => setTasks((prev) => prev.filter((t) => t.id !== id));
@@ -415,9 +588,9 @@ export default function App() {
     return (
       <div className="app" style={{ background: paper, color: ink }}>
         <div className="lock-wrap">
-          <div className="eyebrow mono" style={{ color: teal }}>
-            오늘도 놓치지 않기
-          </div>
+          <h1 className="title mono" style={{ color: teal }}>
+            TODO
+          </h1>
         </div>
       </div>
     );
@@ -427,24 +600,31 @@ export default function App() {
     return (
       <div className="app" style={{ background: paper, color: ink }}>
         <div className="lock-wrap">
-          <div className="eyebrow mono" style={{ color: teal }}>
-            오늘도 놓치지 않기
-          </div>
-          <h1 className="title">메모장 투두</h1>
+          <h1 className="title">TODO</h1>
           <div className="lock-card" style={{ border: `1px solid ${line}` }}>
+            <div className="lock-label">아이디</div>
+            <input
+              type="text"
+              value={userIdInput}
+              onChange={(e) => setUserIdInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") tryUnlock(userIdInput, passwordInput);
+              }}
+              className="lock-input"
+              autoFocus
+            />
             <div className="lock-label">비밀번호</div>
             <input
               type="password"
               value={passwordInput}
               onChange={(e) => setPasswordInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") tryUnlock(passwordInput);
+                if (e.key === "Enter") tryUnlock(userIdInput, passwordInput);
               }}
               className="lock-input"
-              autoFocus
             />
             <button
-              onClick={() => tryUnlock(passwordInput)}
+              onClick={() => tryUnlock(userIdInput, passwordInput)}
               className="add-btn lock-submit"
               style={{ background: teal }}
             >
@@ -462,10 +642,7 @@ export default function App() {
       <div className="wrap">
         <div className="header-row">
           <div>
-            <div className="eyebrow mono" style={{ color: teal }}>
-              오늘도 놓치지 않기
-            </div>
-            <h1 className="title">메모장 투두</h1>
+            <h1 className="title">TODO</h1>
           </div>
           <button onClick={manualRefresh} className="refresh-btn" style={{ color: teal, borderColor: teal }}>
             새로고침
@@ -611,15 +788,28 @@ export default function App() {
                 style={{ color: ink }}
               />
               <div className="input-footer" style={{ borderTop: `1px solid ${line}` }}>
-                <label className="checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={fixedRecurring}
-                    onChange={(e) => setFixedRecurring(e.target.checked)}
-                  />
-                  <Repeat size={13} />
-                  고정 업무 (주말이면 금요일로 당겨서 알림)
-                </label>
+                <div className="input-footer-left">
+                  <select
+                    value={repeat}
+                    onChange={(e) => setRepeat(e.target.value)}
+                    className="repeat-select"
+                    style={{ borderColor: line, color: "#7A7468" }}
+                  >
+                    <option value="none">반복 안함</option>
+                    <option value="weekly">매주</option>
+                    <option value="monthly">매월</option>
+                    <option value="yearly">매년</option>
+                  </select>
+                  <label className="checkbox-label">
+                    <input
+                      type="checkbox"
+                      checked={fixedRecurring}
+                      onChange={(e) => setFixedRecurring(e.target.checked)}
+                    />
+                    <Repeat size={13} />
+                    주말·공휴일이면 앞당겨서 알림
+                  </label>
+                </div>
                 <button onClick={addTask} className="add-btn" style={{ background: teal }}>
                   추가 (Enter)
                 </button>
@@ -705,10 +895,10 @@ export default function App() {
                             {overdue ? " · 지연" : dueToday ? " · 오늘" : ""}
                           </span>
                         )}
-                        {t.fixedRecurring && (
-                          <span className="tag" style={{ background: "#F1EEE6", color: "#7A7468" }}>
+                        {t.repeat && t.repeat !== "none" && (
+                          <span className="tag mono" style={{ background: "#F1EEE6", color: "#7A7468" }}>
                             <Repeat size={10} />
-                            고정 업무
+                            {repeatLabel(t)}
                           </span>
                         )}
                         <button
