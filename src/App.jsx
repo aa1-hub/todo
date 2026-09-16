@@ -384,6 +384,37 @@ function occurrenceInMonth(task, year, monthIdx) {
   return cursor.getFullYear() === year && cursor.getMonth() === monthIdx ? cursor : null;
 }
 
+/** 이 업무가 특정 날짜 범위(start~end, 둘 다 포함) 안에 어떤 날짜로 보여야 하는지 계산 */
+function occurrenceInRange(task, start, end) {
+  if (!task.due) return null;
+  let cursor = new Date(task.due);
+  if (!task.repeat || task.repeat === "none") {
+    return cursor >= start && cursor <= end ? cursor : null;
+  }
+  let guard = 0;
+  while (cursor < start && guard < 60) {
+    const next = computeNextOccurrence({ ...task, due: cursor.toISOString() });
+    if (!next) return null;
+    cursor = next;
+    guard++;
+  }
+  return cursor >= start && cursor <= end ? cursor : null;
+}
+
+function startOfWeek(date) {
+  const d = startOfDay(date);
+  d.setDate(d.getDate() - d.getDay()); // 일요일 시작
+  return d;
+}
+
+function formatWeekRange(start, end) {
+  const sm = start.getMonth() + 1;
+  const sd = start.getDate();
+  const em = end.getMonth() + 1;
+  const ed = end.getDate();
+  return sm === em ? `${sm}월 ${sd}~${ed}일` : `${sm}월 ${sd}일 ~ ${em}월 ${ed}일`;
+}
+
 function repeatLabel(task) {
   if (task.repeat === "monthly") return `매월 ${task.anchorDay}일`;
   if (task.repeat === "weekly") return `매주 ${WEEKDAY_LABEL[task.anchorWeekday]}요일`;
@@ -444,12 +475,13 @@ export default function App() {
   const [repeat, setRepeat] = useState("none"); // none | weekly | monthly | yearly
   const [repeatWeekday, setRepeatWeekday] = useState(new Date().getDay());
   const [repeatMonthDay, setRepeatMonthDay] = useState(new Date().getDate());
-  const [filter, setFilter] = useState("all"); // all | today | upcoming | done | cfs
+  const [filter, setFilter] = useState("all"); // all | today | week | upcoming | done | cfs
   const [copyFlash, setCopyFlash] = useState(false);
   const [viewMonth, setViewMonth] = useState(() => {
     const n = new Date();
     return new Date(n.getFullYear(), n.getMonth(), 1);
   });
+  const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
   const [selectedDate, setSelectedDate] = useState(null); // "YYYY-MM-DD" 형태의 key
   const [calendarOpen, setCalendarOpen] = useState(() =>
     typeof window !== "undefined" ? window.innerWidth > 800 : true
@@ -604,6 +636,14 @@ export default function App() {
   const calendarCells = useMemo(() => buildCalendarCells(viewMonth), [viewMonth]);
   const todayKey = dayKey(new Date());
 
+  const weekEnd = useMemo(() => {
+    const d = new Date(weekStart);
+    d.setDate(d.getDate() + 6);
+    return d;
+  }, [weekStart]);
+
+  const weekLabel = useMemo(() => formatWeekRange(weekStart, weekEnd), [weekStart, weekEnd]);
+
   const filtered = useMemo(() => {
     let list;
     if (selectedDate) {
@@ -612,6 +652,17 @@ export default function App() {
         .map((t) => {
           const occ = occurrenceInMonth(t, selYear, selMonth);
           if (!occ || dayKey(occ) !== selectedDate) return null;
+          return t.repeat && t.repeat !== "none" ? { ...t, due: occ.toISOString() } : t;
+        })
+        .filter(Boolean);
+    } else if (filter === "week") {
+      const rangeStart = weekStart;
+      const rangeEnd = new Date(weekEnd);
+      rangeEnd.setHours(23, 59, 59, 999);
+      list = tasks
+        .map((t) => {
+          const occ = occurrenceInRange(t, rangeStart, rangeEnd);
+          if (!occ) return null;
           return t.repeat && t.repeat !== "none" ? { ...t, due: occ.toISOString() } : t;
         })
         .filter(Boolean);
@@ -635,7 +686,7 @@ export default function App() {
       return new Date(a.due) - new Date(b.due);
     });
     return list;
-  }, [tasks, filter, selectedDate]);
+  }, [tasks, filter, selectedDate, weekStart, weekEnd]);
 
   const copyCfsList = async () => {
     const items = tasks.filter((t) => t.cfsTarget && t.done);
@@ -660,6 +711,10 @@ export default function App() {
     setViewMonth(new Date(n.getFullYear(), n.getMonth(), 1));
   };
 
+  const goPrevWeek = () => setWeekStart((w) => { const d = new Date(w); d.setDate(d.getDate() - 7); return d; });
+  const goNextWeek = () => setWeekStart((w) => { const d = new Date(w); d.setDate(d.getDate() + 7); return d; });
+  const goThisWeek = () => setWeekStart(startOfWeek(new Date()));
+
   const selectDay = (cell) => {
     const key = dayKey(cell.date);
     setSelectedDate((prev) => (prev === key ? null : key));
@@ -676,6 +731,7 @@ export default function App() {
   const tabs = [
     { key: "all", label: "전체" },
     { key: "today", label: "오늘 마감" },
+    { key: "week", label: "이번주" },
     { key: "upcoming", label: "예정" },
     { key: "cfs", label: "CFS 대상" },
     { key: "done", label: "완료" },
@@ -967,28 +1023,46 @@ export default function App() {
                 </button>
               </div>
             ) : (
-              <div className="tabs">
-                {tabs.map((t) => (
-                  <button
-                    key={t.key}
-                    onClick={() => setFilter(t.key)}
-                    className="tab-btn"
-                    style={
-                      filter === t.key
-                        ? { background: teal, color: "#fff" }
-                        : { color: "#7A7468", border: `1px solid ${line}` }
-                    }
-                  >
-                    {t.label}
-                  </button>
-                ))}
-                {filter === "cfs" && (
-                  <button onClick={copyCfsList} className="copy-btn" style={{ border: `1px solid ${teal}`, color: teal }}>
-                    <Clipboard size={12} />
-                    {copyFlash ? "복사됨" : "완료 목록 복사"}
-                  </button>
+              <>
+                <div className="tabs">
+                  {tabs.map((t) => (
+                    <button
+                      key={t.key}
+                      onClick={() => setFilter(t.key)}
+                      className="tab-btn"
+                      style={
+                        filter === t.key
+                          ? { background: teal, color: "#fff" }
+                          : { color: "#7A7468", border: `1px solid ${line}` }
+                      }
+                    >
+                      {t.label}
+                    </button>
+                  ))}
+                  {filter === "cfs" && (
+                    <button onClick={copyCfsList} className="copy-btn" style={{ border: `1px solid ${teal}`, color: teal }}>
+                      <Clipboard size={12} />
+                      {copyFlash ? "복사됨" : "완료 목록 복사"}
+                    </button>
+                  )}
+                </div>
+                {filter === "week" && (
+                  <div className="week-nav-bar" style={{ border: `1px solid ${line}` }}>
+                    <button onClick={goPrevWeek} className="cal-nav-btn" style={{ color: "#7A7468" }}>
+                      <ChevronLeft size={16} />
+                    </button>
+                    <span className="mono" style={{ color: teal, fontWeight: 600 }}>
+                      {weekLabel}
+                    </span>
+                    <button onClick={goNextWeek} className="cal-nav-btn" style={{ color: "#7A7468" }}>
+                      <ChevronRight size={16} />
+                    </button>
+                    <button onClick={goThisWeek} className="week-today-btn" style={{ color: teal, borderColor: teal }}>
+                      이번주로
+                    </button>
+                  </div>
                 )}
-              </div>
+              </>
             )}
 
             <div className="list">
